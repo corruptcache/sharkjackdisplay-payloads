@@ -1,0 +1,100 @@
+#!/bin/bash
+# Title:        Wall Drop Benchmark
+# Author:       corruptcache
+# Version:      1.0
+#
+# Description:  Audits physical Fast Ethernet negotiation speed and WAN 
+#               throughput (Download & Upload) using native Hak5 helpers.
+#               Identifies degraded Layer 1 links and confirms Layer 3 routing.
+
+# CONFIGURATION VARS
+ENABLE_BANDWIDTH_TEST=true
+RESOURCE_TO_PING=8.8.8.8
+BANDWIDTH_TEST_MB=20    # Size of the payload in Megabytes
+
+# --- SETUP PHASE ---
+LED SETUP
+
+# Use native Hak5 helpers to handle DHCP and loading UI
+CREATE_SPINNER "Starting DHCP"
+NETMODE DHCP_CLIENT
+STOP_SPINNER
+
+# Wait for physical carrier and an IP address assignment natively
+WAIT_FOR_LINK
+WAIT_FOR_IP
+
+# --- EXECUTION PHASE 1: PHYSICAL LINK ---
+LED STAGE1
+
+# Query switch0 Port 0 link speed directly
+SPEED=$(swconfig dev switch0 port 0 get link 2>/dev/null | awk -F'speed:' '{print $2}' | grep -oE '[0-9]+')
+
+case "$SPEED" in
+    100)
+        SCREEN_WRITE "Link: 100 Mbps"
+        ;;
+    10)
+        SCREEN_WRITE "Link: 10 Mbps"
+        # Visual override for a severely degraded link (bad cable/punch-down)
+        LED Y SLOW
+        sleep 3
+        LED Y SOLID
+        ;;
+    *)
+        SCREEN_WRITE "Link: Offline"
+        LED FAIL2
+        exit 1
+        ;;
+esac
+
+# --- EXECUTION PHASE 2: WAN & NETWORK INFO ---
+if [ "$ENABLE_BANDWIDTH_TEST" = "true" ]; then
+    
+    # Signal the start of Phase 2
+    LED STAGE2
+    
+    if ping -c1 -W 2 "$RESOURCE_TO_PING" >/dev/null; then
+        # Automatically calculate conversion metrics for the curl command and awk formula
+        TEST_BYTES=$((BANDWIDTH_TEST_MB * 1000000))
+        TEST_MEGABITS=$((BANDWIDTH_TEST_MB * 8))
+
+        # 1. DOWNLOAD TEST
+        CREATE_SPINNER "Testing DL"
+        TIME_DOWN=$(curl -s -w "%{time_total}" -o /dev/null "https://speed.cloudflare.com/__down?bytes=${TEST_BYTES}")
+        MBPS_DOWN=$(echo "$TIME_DOWN" | awk -v mb="$TEST_MEGABITS" '{printf "%.2f", (mb / $1)}')
+        STOP_SPINNER
+        
+        # 2. UPLOAD TEST (Zero Storage)
+        CREATE_SPINNER "Testing UL"
+        TIME_UP=$(dd if=/dev/zero bs=1000000 count=${BANDWIDTH_TEST_MB} 2>/dev/null | curl -s -w "%{time_total}" -o /dev/null --data-binary @- https://speed.cloudflare.com/__up)
+        MBPS_UP=$(echo "$TIME_UP" | awk -v mb="$TEST_MEGABITS" '{printf "%.2f", (mb / $1)}')
+        STOP_SPINNER
+        
+        # Print results to OLED
+        SCREEN_WRITE "DL: ${MBPS_DOWN} Mbps"
+        SCREEN_WRITE "UL: ${MBPS_UP} Mbps"
+        
+        # Extract IP and CIDR notation
+        SUBNET=$(ip -4 addr show eth0 | awk '/inet / {print $2}')
+        SCREEN_WRITE "Net: $SUBNET"
+        
+    else
+        SCREEN_WRITE "No WAN access"
+        LED FAIL
+        exit 1
+    fi
+fi
+
+# --- FINISH PHASE ---
+case "$SPEED" in
+    100)
+        LED FINISH
+        ;;
+    10)
+        LED Y SOLID
+        ;;
+    *)
+        LED FAIL2
+        ;;
+esac
